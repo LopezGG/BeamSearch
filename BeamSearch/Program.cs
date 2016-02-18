@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -19,14 +20,13 @@ namespace BeamSearch
             int TopN = Convert.ToInt32(args[5]);
             int TopK = Convert.ToInt32(args[6]);
             Dictionary<string, Dictionary<string, double>> ClassFeatureDict = new Dictionary<string, Dictionary<string, double>>();
-            Dictionary<string, Dictionary<string, double>> WordClassDict = new Dictionary<string, Dictionary<string, double>>();
             List<String> TagList = new List<string>();
             //Reads Model File and builds the required DS
-            ReadModelFile(ClassFeatureDict, WordClassDict, ModelFile, TopN,TagList);
+            ReadModelFile(ClassFeatureDict, ModelFile,TagList);
             
             List<int> LineBoundaries = new List<int>();
             ReadBoundaryFile(BoundaryPath, LineBoundaries);
-
+            Stopwatch stopwatch = Stopwatch.StartNew();
 
             // we are reading test data from here on
             string line,  prevT="", prev2Tag="";
@@ -74,26 +74,12 @@ namespace BeamSearch
                         if (words[i].Trim() !="1")    
                             Features.Add(words[i]);
                     }
-                    if (String.IsNullOrWhiteSpace(curWord))
-                    {
-                        word = words[0].Substring(words[0].LastIndexOf("-") + 1);
-                        curWord = "curW=" + word;
-                    }
+
                     curWord = curWord.Trim();   
                     //this is for storign previous tags
                     List<string> AddFeatures = new List<string>();
                     List<String> ClassList = new List<string>();
-                    //if we have not seen the current word in the test instance we just continue
-                    if (!WordClassDict.ContainsKey(curWord))
-                    {
-                        ClassList = TagList;
-                    }
-                    else
-                    {
-                        ClassList = WordClassDict[curWord].Keys.ToList();
-                    }
-                    //this is to help us find prob.
-                    double totalScoreAcrossAllPaths = 0;    
+
                     foreach (var nd in Parent)
                     {
                         AddFeatures.Clear();
@@ -106,8 +92,9 @@ namespace BeamSearch
                         AddFeatures.Add("prevT=" + prevT);
                         AddFeatures.Add("prevTwoTags=" + prev2Tag + "+" + prevT);
                         //this loop handles topN condition
-
-                        foreach (var classLabel in ClassList)
+                        List<Node> CandForTopN = new List<Node>();
+                        double normalizerPerParent = 0;
+                        foreach (var classLabel in TagList)
                         {
                             score = 0;
                             var ClassLambda = ClassFeatureDict[classLabel];
@@ -129,18 +116,27 @@ namespace BeamSearch
                             }
                             score += ClassLambda["<default>"];
                             score = System.Math.Exp(score);
-                            
-                            
-                            totalScoreAcrossAllPaths += score;
+
+                            normalizerPerParent += score;
                             //we will update the pathScore later
                             Node Cand = new Node(word, classLabel, score,0,nd);
-                            CurCandidates.Add(Cand);
-                        } 
+                            CandForTopN.Add(Cand);
+                        }
+                        CandForTopN = CandForTopN.OrderByDescending(x => x.score).Take(TopN).ToList();
+                        foreach (var cand in CandForTopN)
+                        {
+                            cand.score /= normalizerPerParent;
+                        }
+                        
+                        foreach (var TopNNode in CandForTopN)
+                        {
+                            CurCandidates.Add(TopNNode);
+                        }
                     }
                     
                     foreach (var cd in CurCandidates)
                     {
-                        cd.score = cd.score / totalScoreAcrossAllPaths;
+                        //cd.score = cd.score / totalScoreAcrossAllPaths;
                         cd.PathScore = System.Math.Log10(cd.score) + (cd.PrevNode.PathScore);
                         //this will help in pruning by beam size
                         if (cd.PathScore > maxScore)
@@ -174,6 +170,8 @@ namespace BeamSearch
 
                 }
             }
+            stopwatch.Stop();
+            Console.WriteLine("Time elapsed: {0}", stopwatch.Elapsed);
             Console.WriteLine("Accuracy : " + Convert.ToString(Correct/totalLines));
             Sw.Close();
             Console.ReadLine();
@@ -191,13 +189,13 @@ namespace BeamSearch
                 }
             }
         }
-        public static void ReadModelFile (Dictionary<string, Dictionary<string, double>> ClassFeatureDict, Dictionary<string, Dictionary<string, double>> WordClassDict, string ModelFile, int TopN, List<String> TagList)
+        public static void ReadModelFile (Dictionary<string, Dictionary<string, double>> ClassFeatureDict, string ModelFile, List<String> TagList)
         {
             string line, classLabel = "", key = "";
             double value = 0;
             using (StreamReader Sr = new StreamReader(ModelFile))
             {
-                Dictionary<string, Dictionary<string, double>> WordClassDictTemp = new Dictionary<string, Dictionary<string, double>>();
+                
                 while ((line = Sr.ReadLine()) != null)
                 {
                     if (String.IsNullOrWhiteSpace(line))
@@ -217,26 +215,9 @@ namespace BeamSearch
                     key = words[0];
                     key = key.Trim();
                     value = Convert.ToDouble(words[1]);
-                    // this will help us with gettign topN
-                    if (key.Contains("curW"))
-                    {
-                        if (WordClassDictTemp.ContainsKey(key) && WordClassDictTemp[key].ContainsKey(classLabel))
-                            WordClassDictTemp[key][classLabel] += value;
-                        else if (WordClassDictTemp.ContainsKey(key))
-                            WordClassDictTemp[key].Add(classLabel, value);
-                        else
-                        {
-                            Dictionary<string, double> temp = new Dictionary<string, double>();
-                            temp.Add(classLabel, value);
-                            WordClassDictTemp.Add(key, temp);
-                        }
-
-                    }
 
                     // Now we will create a dictionary for each class and word in it
-                    if (ClassFeatureDict.ContainsKey(classLabel) && ClassFeatureDict[classLabel].ContainsKey(key))
-                        ClassFeatureDict[classLabel][key] += value;
-                    else if (ClassFeatureDict.ContainsKey(classLabel))
+                    if (ClassFeatureDict.ContainsKey(classLabel))
                         ClassFeatureDict[classLabel].Add(key, value);
                     else
                     {
@@ -245,12 +226,6 @@ namespace BeamSearch
                         ClassFeatureDict.Add(classLabel, temp1);
                     }
 
-                }
-                //now we are going to sort the wordClass Dict to retain only topN classes for each word
-                foreach (var wordClassList in WordClassDictTemp)
-                {
-                    var Wc = wordClassList.Value.OrderByDescending(x => x.Value).Take(TopN).ToDictionary(x => x.Key, x => x.Value);
-                    WordClassDict.Add(wordClassList.Key, Wc);
                 }
             }
 
